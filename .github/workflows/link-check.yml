@@ -18,55 +18,57 @@ jobs:
 
           ROOT = Path('.').resolve()
 
-          def is_external(u: str) -> bool:
-            u = u.strip()
-            return bool(re.match(r'^(?:https?:|mailto:|tel:|data:|javascript:|#)', u, re.I))
+          EXTERNAL = re.compile(r'^(?:https?:|mailto:|tel:|data:|javascript:|#)', re.I)
+          ATTR    = re.compile(r'(?:\\b(?:src|href|data-src|poster)\\s*=\\s*(["\\\'])([^"\\\']+)\\1)', re.I)
+          SRCSET  = re.compile(r'\\bsrcset\\s*=\\s*(["\\\'])([^"\\\']+)\\1', re.I)
+          CSSURL  = re.compile(r'url\\(\\s*([^)]+?)\\s*\\)', re.I)
 
-          def norm(u: str) -> str:
-            u = u.strip().replace('\\', '/')
-            u = u.split('#', 1)[0]
-            u = u.split('?', 1)[0]
-            while u.startswith('/'): u = u[1:]
-            while u.startswith('./'): u = u[2:]
-            while u.startswith('../'): u = u[3:]
-            return re.sub(r'/+', '/', u)
-
-          attr_re   = re.compile(r'''(?:\b(?:src|href|data-src|poster)\s*=\s* (["'])([^"']+)\1)''', re.I | re.VERBOSE)
-          srcset_re = re.compile(r'''\bsrcset\s*=\s*(["'])([^"']+)\1''', re.I | re.VERBOSE)
-          url_re    = re.compile(r'url\(\s*([^)]+?)\s*\)', re.I)
+          def resolve(base: Path, url: str) -> Path | None:
+            """Resolve url relativa ao arquivo base; / começa na raiz do repo."""
+            u = url.strip().strip('"\\\'')
+            if not u or EXTERNAL.match(u): return None
+            u = u.split('#',1)[0].split('?',1)[0]
+            u = u.replace('\\\\','/')
+            cand = (ROOT / u.lstrip('/')) if u.startswith('/') else (base.parent / u)
+            cand = cand.resolve()
+            # não permitir sair da raiz do repo
+            try:
+              cand.relative_to(ROOT)
+            except Exception:
+              return cand  # tratar como missing
+            return cand
 
           problems = []
 
-          for p in ROOT.rglob('*.html'):
-            txt = p.read_text(encoding='utf-8', errors='ignore')
+          for html in ROOT.rglob('*.html'):
+            txt = html.read_text(encoding='utf-8', errors='ignore')
 
-            for m in attr_re.finditer(txt):
-              url = m.group(2).strip()
-              if url and not url.startswith('#') and not is_external(url):
-                n = norm(url)
-                if not (ROOT / n).exists():
-                  problems.append({'file': str(p), 'attr': 'attr', 'url': url, 'normalized': n})
+            for m in ATTR.finditer(txt):
+              url = m.group(2)
+              cand = resolve(html, url)
+              if cand and not cand.exists():
+                problems.append({'file': str(html), 'attr': 'attr', 'url': url,
+                                 'resolved': str(cand.relative_to(ROOT))})
 
-            for m in srcset_re.finditer(txt):
-              val = m.group(2)
-              for part in [s.strip() for s in val.split(',') if s.strip()]:
+            for m in SRCSET.finditer(txt):
+              for part in [s.strip() for s in m.group(2).split(',') if s.strip()]:
                 url = part.split()[0]
-                if url and not url.startswith('#') and not is_external(url):
-                  n = norm(url)
-                  if not (ROOT / n).exists():
-                    problems.append({'file': str(p), 'attr': 'srcset', 'url': url, 'normalized': n})
+                cand = resolve(html, url)
+                if cand and not cand.exists():
+                  problems.append({'file': str(html), 'attr': 'srcset', 'url': url,
+                                   'resolved': str(cand.relative_to(ROOT))})
 
-            for m in url_re.finditer(txt):
-              url = m.group(1).strip().strip('"\'')
-              if url and not url.startswith('#') and not is_external(url):
-                n = norm(url)
-                if not (ROOT / n).exists():
-                  problems.append({'file': str(p), 'attr': 'style-url', 'url': url, 'normalized': n})
+            for m in CSSURL.finditer(txt):
+              url = m.group(1).strip().strip('"\\\'')
+              cand = resolve(html, url)
+              if cand and not cand.exists():
+                problems.append({'file': str(html), 'attr': 'style-url', 'url': url,
+                                 'resolved': str(cand.relative_to(ROOT))})
 
           if problems:
             print(f'Broken internal links: {len(problems)}')
-            for r in problems[:100]:
-              print(f"- {r['file']}: {r['attr']}='{r['url']}' → {r['normalized']} (MISSING)")
+            for r in problems[:120]:
+              print(f"- {r['file']}: {r['attr']}='{r['url']}' → {r['resolved']} (MISSING)")
             Path('link-report.json').write_text(json.dumps(problems, indent=2), encoding='utf-8')
             sys.exit(1)
 
@@ -79,3 +81,4 @@ jobs:
         with:
           name: link-report
           path: link-report.json
+
