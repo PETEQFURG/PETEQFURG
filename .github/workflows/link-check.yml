@@ -1,16 +1,64 @@
+
 name: link-check
 on:
   pull_request:
   push:
     branches: [ "main" ]
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verificar links internos
-        uses: lycheeverse/lychee-action@v1
+
+      - name: Internal link audit (HTML)
+        run: |
+          python - << 'PY'
+          import os, re, sys, json
+          from pathlib import Path
+          ROOT = Path('.').resolve()
+          def is_external(u):
+              return bool(re.match(r'^(?:https?:|mailto:|tel:|data:|javascript:|#)', u.strip(), re.I))
+          def norm(u):
+              u = u.strip().replace('\\','/')
+              u = u.split('#',1)[0]
+              u = u.split('?',1)[0]
+              while u.startswith('/'): u = u[1:]
+              while u.startswith('./'): u = u[2:]
+              while u.startswith('../'): u = u[3:]
+              u = re.sub(r'/+','/',u)
+              return u
+          def links(html):
+              out=[]
+              for m in re.finditer(r'\\b(src|href|data-src|poster)\\s*=\\s*([\\'\\"])([^\\'\\"]+)\\2', html, re.I):
+                  out.append((m.group(1).lower(), m.group(3).strip()))
+              for m in re.finditer(r'\\bsrcset\\s*=\\s*([\\'\\"])([^\\'\\"]+)\\1', html, re.I):
+                  for p in [s.strip() for s in m.group(2).split(',') if s.strip()]:
+                      sp=p.split(); out.append(('srcset', sp[0]))
+              for m in re.finditer(r'url\\(\\s*([^)]+?)\\s*\\)', html, re.I):
+                  inner=m.group(1).strip().strip('\\'\\\"'); out.append(('style-url', inner))
+              return out
+          problems=[]
+          for p in ROOT.rglob('*.html'):
+              txt=p.read_text(encoding='utf-8', errors='ignore')
+              for attr,u in links(txt):
+                  if not u or u.startswith('#') or is_external(u): continue
+                  n=norm(u)
+                  target=(ROOT/n)
+                  if not target.exists():
+                      problems.append({'file': str(p), 'attr': attr, 'url': u, 'normalized': n})
+          if problems:
+              print('Broken internal links:', len(problems))
+              for r in problems[:100]:
+                  print(f"- {r['file']}: {r['attr']}='{r['url']}' → {r['normalized']} (MISSING)")
+              Path('link-report.json').write_text(json.dumps(problems, indent=2), encoding='utf-8')
+              sys.exit(1)
+          print('OK: no missing internal links')
+          PY
+
+      - name: Upload link report if failed
+        if: failure()
+        uses: actions/upload-artifact@v4
         with:
-          args: --no-progress --base . ./
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: link-report
+          path: link-report.json
